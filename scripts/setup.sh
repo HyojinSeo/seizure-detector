@@ -16,7 +16,7 @@
 
 set -e  # Exit immediately on any error
 
-PROJECT_DIR="$(pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 
 echo "=== Step 1: Update package index ==="
