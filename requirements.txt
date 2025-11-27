@@ -1,0 +1,22 @@
+# Core scientific computing
+numpy
+scipy
+
+# Data handling / CSV / tables
+pandas
+
+# Video processing & image utils
+opencv-python
+
+# Machine Learning / Deep Learning
+tensorflow==2.15
+scikit-learn
+
+# Utility
+tqdm
+
+# Plotting for debugging / visualization
+matplotlib
+
+# Optional but recommended (for yaml config files)
+pyyaml
