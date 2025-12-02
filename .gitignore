@@ -238,3 +238,6 @@ logs/
 # MacOS files
 .DS_Store
 
+# Backup files
+*~
+
