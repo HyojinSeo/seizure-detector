@@ -45,7 +45,7 @@ import numpy as np
 
 DEFAULT_INPUT_DIR = Path("~/gcs/inputs").expanduser()
 DEFAULT_STEP_FRAMES = 30
-DEFAULT_OUTPUT_CSV = Path("data/alignment_summary.csv")   # SAVE TO data/
+DEFAULT_OUTPUT_CSV = Path("~/seizure_detector/data/alignment_summary.csv")
 
 
 # ---------------------------------------------------------------------------
