@@ -218,6 +218,7 @@ gcs/
 inputs/
 videos/
 *.mp4
+*.xlsx
 
 # Large numpy arrays
 *.npy
