@@ -20,3 +20,6 @@ matplotlib
 
 # Optional but recommended (for yaml config files)
 pyyaml
+
+# Read excel
+openpyxl
