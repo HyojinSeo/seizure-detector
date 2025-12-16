@@ -220,6 +220,7 @@ videos/
 *.mp4
 
 # Large numpy arrays
+/data/processed_seq/
 *.npy
 *.npz
 
