@@ -24,6 +24,28 @@ from typing import Dict, List, Tuple
 import numpy as np
 import tensorflow as tf
 
+class MemmapSequence(tf.keras.utils.Sequence):
+    def __init__(self, X: Dict[str, np.ndarray], y: np.ndarray, views: List[str], idx: np.ndarray, batch_size: int, shuffle: bool = True):
+        self.X = X
+        self.y = y
+        self.views = views
+        self.idx = np.array(idx, dtype=np.int64)
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.on_epoch_end()
+
+    def __len__(self) -> int:
+        return int(np.ceil(len(self.idx) / self.batch_size))
+
+    def __getitem__(self, i: int):
+        sl = self.idx[i * self.batch_size : (i + 1) * self.batch_size]
+        inputs = {v: np.array(self.X[v][sl], dtype=np.float32) for v in self.views}  # batch만 RAM으로
+        labels = np.array(self.y[sl], dtype=np.int32)
+        return inputs, labels
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.idx)
 
 def load_meta(data_dir: Path) -> Dict:
     with open(data_dir / "meta.json", "r", encoding="utf-8") as f:
@@ -31,8 +53,8 @@ def load_meta(data_dir: Path) -> Dict:
 
 
 def load_arrays(data_dir: Path, views: List[str]) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
-    X = {v: np.load(data_dir / f"X_{v}.npy") for v in views}
-    y = np.load(data_dir / "y.npy").astype(np.int32)
+    X = {v: np.load(data_dir / f"X_{v}.npy", mmap_mode="r") for v in views}
+    y = np.load(data_dir / "y.npy", mmap_mode="r").astype(np.int32)
     return X, y
 
 
@@ -134,8 +156,8 @@ def main() -> None:
     shapes = {v: X[v].shape for v in views}
 
     tr_idx, va_idx = split_indices(N, args.val_split, args.seed)
-    train_ds = make_ds(X, y, views, tr_idx, args.batch_size)
-    val_ds = make_ds(X, y, views, va_idx, args.batch_size)
+    train_seq = MemmapSequence(X, y, views, tr_idx, args.batch_size, shuffle=True)
+    val_seq   = MemmapSequence(X, y, views, va_idx, args.batch_size, shuffle=False)
 
     model = build_model(views, shapes, lr=args.lr)
 
@@ -160,7 +182,7 @@ def main() -> None:
         tf.keras.callbacks.CSVLogger(str(results_dir / "train_log.csv")),
     ]
 
-    history = model.fit(train_ds, validation_data=val_ds, epochs=args.epochs, callbacks=callbacks, verbose=1)
+    history = model.fit(train_seq, validation_data=val_seq, epochs=args.epochs, callbacks=callbacks, verbose=1)
 
     model.save(str(results_dir / "final_model.keras"))
     with open(results_dir / "history.json", "w", encoding="utf-8") as f:
