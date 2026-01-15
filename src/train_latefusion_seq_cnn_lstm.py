@@ -40,7 +40,7 @@ class MemmapSequence(tf.keras.utils.Sequence):
     def __getitem__(self, i: int):
         sl = self.idx[i * self.batch_size : (i + 1) * self.batch_size]
         inputs = {v: np.array(self.X[v][sl], dtype=np.float32) for v in self.views}  # batch만 RAM으로
-        labels = np.array(self.y[sl], dtype=np.int32)
+        labels = np.array(self.y[sl], dtype=np.int32).reshape(-1, 1)
         return inputs, labels
 
     def on_epoch_end(self):
