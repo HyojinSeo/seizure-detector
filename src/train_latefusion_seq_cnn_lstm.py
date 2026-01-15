@@ -188,7 +188,7 @@ def main() -> None:
     with open(results_dir / "history.json", "w", encoding="utf-8") as f:
         json.dump({k: [float(x) for x in v] for k, v in history.history.items()}, f, indent=2)
 
-    eval_vals = model.evaluate(val_ds, verbose=0)
+    eval_vals = model.evaluate(val_seq, verbose=0)
     metrics = {k: float(v) for k, v in zip(model.metrics_names, eval_vals)}
     with open(results_dir / "eval_metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
