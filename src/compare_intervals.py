@@ -109,11 +109,13 @@ def compare_intervals(label_intervals, pred_intervals):
 # Main
 # =========================
 if __name__ == "__main__":
-    LABEL_XLSX = "010626F1.xlsx"
-    PRED_XLSX = "KA010626_F1_intervals.xlsx"
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--label_xlsx", required=True, type=str, help="Label Excel (.xlsx) path")
+    ap.add_argument("--pred_xlsx", required=True, type=str, help="Prediction Excel (.xlsx) path")
+    args = ap.parse_args()
 
-    label_intervals = load_label_intervals(LABEL_XLSX)
-    pred_intervals = load_pred_intervals(PRED_XLSX)
+    label_intervals = load_label_intervals(args.label_xlsx)
+    pred_intervals = load_pred_intervals(args.pred_xlsx)
 
     TP, FP, FN = compare_intervals(label_intervals, pred_intervals)
 
