@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
+RAW_VIDEO_DIR = Path("~/gcs/inputs").expanduser()
 
 FPS_TARGET = 1
 RESIZE_SHAPE = (128, 128)
@@ -65,18 +66,79 @@ def make_sequences(X_frames: np.ndarray, seq_len: int, stride: int) -> np.ndarra
         seqs.append(X_frames[start:start+seq_len])  # (T,H,W,1)
     if not seqs:
         raise RuntimeError(f"No sequences created. N={N}, seq_len={seq_len}")
-    return np.stack(seqs, axis=0)  # (Nseq,T,H,W,1)
+    return np.stack(seqs, axis=0).astype(np.float32)  # (Nseq,T,H,W,1)
 
 
-def find_view_files(input_dir: Path) -> Dict[str, Path]:
-    files = list(input_dir.iterdir())
-    out = {}
+def find_view_files_by_session(raw_video_dir: Path, session: str) -> Dict[str, Path]:
+    """
+    session examples:
+      "KA010626 M2"
+      "KA010626 M2 B"
+
+    Searches raw_video_dir for:
+      POST KA010626 M2 ... -webcamup(.mp4)
+      POST KA010626 M2 ... -webcamside1(.mp4)
+      POST KA010626 M2 ... -webcamside2(.mp4)
+    """
+    s = session.strip().upper()
+
+    # allow user to type with/without KA prefix
+    if not s.startswith("KA"):
+        s = "KA" + s
+
+    # Split like: KA010626 M2 B -> date=010626, animal=M2, booster=True
+    parts = s.split()
+    if len(parts) < 2:
+        raise ValueError('Session must look like "KA010626 M2" or "KA010626 M2 B"')
+
+    date = parts[0].replace("KA", "")
+    animal = parts[1]
+    booster = (len(parts) >= 3 and parts[2] == "B")
+
+    # Build a tolerant matcher (spaces/dashes don’t matter)
+    def is_match(p: Path, view_sub: str) -> bool:
+        name = p.name.lower()
+
+        if not name.endswith(".mp4"):
+            return False
+        if "post ka" not in name:
+            return False
+        if date.lower() not in name:
+            return False
+        if animal.lower() not in name:
+            return False
+        if view_sub not in name:
+            return False
+
+        if booster:
+            # require booster indicator near animal (e.g., "M2 B")
+            if f"{animal.lower()} b" not in name:
+                return False
+        else:
+            # avoid mixing booster files
+            if f"{animal.lower()} b" in name:
+                return False
+
+        return True
+
+    out: Dict[str, Path] = {}
     for v, sub in VIEW_SUBSTR.items():
-        cand = [p for p in files if p.is_file() and p.suffix.lower() == ".mp4" and sub in p.name.lower()]
+        cand = [
+            p for p in raw_video_dir.iterdir()
+            if p.is_file() and is_match(p, sub)
+        ]
+
         if len(cand) != 1:
-            raise RuntimeError(f"Expected exactly 1 file for {v} containing '{sub}'. Found {len(cand)}.")
+            raise RuntimeError(
+                f"Expected exactly 1 match for {v} in {raw_video_dir} "
+                f"(session={session}). Found {len(cand)}: "
+                f"{[c.name for c in cand[:5]]}"
+            )
+
         out[v] = cand[0]
+
     return out
+
 
 
 def probs_to_intervals(probs: np.ndarray, threshold: float) -> List[Tuple[float, float, float]]:
@@ -105,15 +167,17 @@ def probs_to_intervals(probs: np.ndarray, threshold: float) -> List[Tuple[float,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input_dir", required=True, type=str, help="Folder containing TOP/SIDE/SIDE2 mp4 for one session")
+    #ap.add_argument("--input_dir", required=True, type=str, help="Folder containing TOP/SIDE/SIDE2 mp4 for one session")
+    ap.add_argument("--session", required=True, type=str, help='Session like "KA010626 M2" or "KA010626 M2 B"')
+    ap.add_argument("--raw_video_dir", type=str, default=str(RAW_VIDEO_DIR), help="Where to search videos (default: ~/gcs/inputs)")
     ap.add_argument("--model_path", required=True, type=str, help="Path to best_model.keras")
     ap.add_argument("--out_xlsx", required=True, type=str, help="Output Excel (.xlsx) path for seizure intervals")
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--batch_size", type=int, default=16)
     args = ap.parse_args()
 
-    input_dir = Path(args.input_dir)
-    view_files = find_view_files(input_dir)
+    raw_video_dir = Path(args.raw_video_dir).expanduser()
+    view_files = find_view_files_by_session(raw_video_dir, args.session)
 
     print("Using files:")
     for v, p in view_files.items():
