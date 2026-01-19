@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import argparse
-import json
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -108,7 +107,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input_dir", required=True, type=str, help="Folder containing TOP/SIDE/SIDE2 mp4 for one session")
     ap.add_argument("--model_path", required=True, type=str, help="Path to best_model.keras")
-    ap.add_argument("--out_csv", required=True, type=str, help="Output CSV for seizure intervals")
+    ap.add_argument("--out_xlsx", required=True, type=str, help="Output Excel (.xlsx) path for seizure intervals")
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--batch_size", type=int, default=16)
     args = ap.parse_args()
@@ -142,11 +141,16 @@ def main():
     intervals = probs_to_intervals(probs, threshold=args.threshold)
 
     df_intervals = pd.DataFrame(intervals, columns=["start_sec", "end_sec", "mean_prob"])
-    df_intervals["start_hms"] = pd.to_timedelta(df_intervals["start_sec"], unit="s")
-    df_intervals["end_hms"] = pd.to_timedelta(df_intervals["end_sec"], unit="s")
+    if len(df_intervals) == 0:
+        print("[OK] No seizure intervals detected with the given threshold.")
+    else:
+        df_intervals["start_hms"] = pd.to_timedelta(df_intervals["start_sec"], unit="s")
+        df_intervals["end_hms"] = pd.to_timedelta(df_intervals["end_sec"], unit="s")
 
-    df_intervals.to_csv(args.out_csv, index=False)
-    print(f"[OK] Saved intervals CSV: {args.out_csv}")
+    out_path = Path(args.out_xlsx)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df_intervals.to_excel(out_path, index=False)
+    print(f"[OK] Saved intervals Excel: {out_path}")
     print(df_intervals.head(20))
 
 
