@@ -133,7 +133,7 @@ def main() -> None:
         "batch_size": args.batch_size,
         "cm_threshold": args.cm_threshold,
         "out_path": str(out_path),
-        "confusion_matrix": cm,
+        "confusion_matrix": cm.tolist(),
     }
     with open(out_dir / f"confusion_matrix_val_thr{args.cm_threshold:.2f}.json", "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
