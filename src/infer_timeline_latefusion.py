@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from tqdm import tqdm
 
 RAW_VIDEO_DIR = Path("~/gcs/inputs").expanduser()
 
@@ -36,7 +37,9 @@ def extract_frames_1fps_gray(video_path: Path) -> np.ndarray:
 
     frames: List[np.ndarray] = []
     t = 0.0
-    while t < duration_sec:
+    n_steps = int(duration_sec * FPS_TARGET)
+    for _ in tqdm(range(n_steps), desc=f"Extracting {video_path.name}"):
+        t = _ / FPS_TARGET
         cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
         ok, frame = cap.read()
         if not ok:
@@ -44,7 +47,6 @@ def extract_frames_1fps_gray(video_path: Path) -> np.ndarray:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray_resized = cv2.resize(gray, RESIZE_SHAPE)
         frames.append(gray_resized)
-        t += 1.0 / FPS_TARGET
 
     cap.release()
     if not frames:
