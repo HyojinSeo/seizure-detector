@@ -23,6 +23,8 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import tensorflow as tf
+from sklearn.metrics import confusion_matrix
+import pandas as pd
 
 class MemmapSequence(tf.keras.utils.Sequence):
     def __init__(self, X: Dict[str, np.ndarray], y: np.ndarray, views: List[str], idx: np.ndarray, batch_size: int, shuffle: bool = True):
@@ -139,6 +141,7 @@ def main() -> None:
     ap.add_argument("--val_split", type=float, default=0.2)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--cm_threshold", type=float, default=0.5)
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -192,6 +195,35 @@ def main() -> None:
     metrics = {k: float(v) for k, v in zip(model.metrics_names, eval_vals)}
     with open(results_dir / "eval_metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
+      
+    best_path = results_dir / "best_model.keras"
+    if best_path.exists():
+      model = tf.keras.models.load_model(best_path)
+    cm_root = Path.home() / "seizure-detector" / "results" / "confusion_matrices"
+    cm_root.mkdir(parents=True, exist_ok=True)
+
+    exp_name = results_dir.name  # e.g. top_side
+    cm_dir = cm_root / exp_name
+    cm_dir.mkdir(parents=True, exist_ok=True)
+    
+    y_true = []
+    y_pred = []
+    for inputs, labels in val_seq:
+        probs = model.predict(inputs, verbose=0)
+        preds = (probs >= args.cm_threshold).astype(int)
+        y_true.extend(labels.reshape(-1).tolist())
+        y_pred.extend(preds.reshape(-1).tolist())
+
+    cm = confusion_matrix(y_true, y_pred)
+    cm_df = pd.DataFrame(
+      cm,
+      index=["true_0", "true_1"],
+      columns=["pred_0", "pred_1"]
+    )
+    cm_path = cm_dir / f"confusion_matrix_val_thr{args.cm_threshold:.2f}.csv"
+    cm_df.to_csv(cm_path, index=True)
+    
+    print(f"[OK] Saved {cm_path}")
 
     print("[OK] Training done.")
     for k, v in metrics.items():
