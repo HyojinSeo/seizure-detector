@@ -165,7 +165,13 @@ def probs_to_intervals(probs: np.ndarray, threshold: float) -> List[Tuple[float,
         intervals.append((float(start), float(end), mean_p))
         i = j
     return intervals
-
+    
+def sec_to_hhmmss(sec: float) -> str:
+    sec_int = int(round(sec))
+    h = sec_int // 3600
+    m = (sec_int % 3600) // 60
+    s = sec_int % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 def main():
     ap = argparse.ArgumentParser()
@@ -210,8 +216,8 @@ def main():
     if len(df_intervals) == 0:
         print("[OK] No seizure intervals detected with the given threshold.")
     else:
-        df_intervals["start_hms"] = pd.to_timedelta(df_intervals["start_sec"], unit="s")
-        df_intervals["end_hms"] = pd.to_timedelta(df_intervals["end_sec"], unit="s")
+        df_intervals["start_hms"] = df_intervals["start_sec"].apply(sec_to_hhmmss)
+        df_intervals["end_hms"] = df_intervals["end_sec"].apply(sec_to_hhmmss)
 
     out_path = Path(args.out_xlsx)
     out_path.parent.mkdir(parents=True, exist_ok=True)
