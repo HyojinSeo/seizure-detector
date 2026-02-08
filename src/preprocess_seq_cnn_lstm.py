@@ -104,9 +104,17 @@ def get_session_id_from_sheet(sheet_name: str) -> str:
         return None
     date = m.group(1)
     rat = m.group(2).upper()
-    is_booster = clean.upper().endswith("_B")
-    if is_booster:
-        return f"{date} {rat}_B"
+    # booster pattern: B, B-1, B-2 ...
+    booster_match = re.search(r"\bB[-_]?(\d+)?\b", path.name, re.IGNORECASE)
+
+    if booster_match:
+        b_num = booster_match.group(1)
+        if b_num:
+            session_id = f"{date} {rat}_B-{b_num}"
+        else:
+            session_id = f"{date} {rat}_B"
+    else:
+        session_id = f"{date} {rat}"
     return f"{date} {rat}"
 
 
