@@ -13,6 +13,16 @@ End-to-end pipeline for the CNN + LSTM/GRU model:
 - Builds sliding-window sequences (T frames) per session and per view
 - Saves per-session npy files for each view (X_SEQ_*, y_SEQ_*)
 
+Supports booster sessions:
+- _B, _B-1, _B-2 (from Excel sheets) and
+- "B", "B-1", "B-2" (from video filenames)
+
+Filtering:
+- Use env var SESSIONS="121125 F1_B,121325 M3_B-1" to run a subset only.
+
+Optional:
+- SKIP_EXISTING=1 to skip session+view if output npy files already exist.
+
 Author: Hyojin Seo
 """
 
@@ -20,7 +30,6 @@ import os
 import re
 import json
 from typing import Dict, List, Tuple
-
 from pathlib import Path
 
 import cv2
@@ -43,7 +52,7 @@ SEQ_LEN = 16
 STRIDE = 4
 LABEL_MODE = "any"  # "any", "max", "center", "majority"
 
-# Project paths
+# Project paths (stable regardless of CWD)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Video input folder (mount point from GCS)
@@ -67,8 +76,11 @@ VIEW_CONFIG = {
 # Allowed video extensions
 VALID_EXTS = (".mp4",)
 
-# Manifest file to keep track of processed sessions
+# Manifest file to keep track of processed sessions (append-only)
 MANIFEST_PATH = OUTPUT_DIR / "manifest_sessions.json"
+
+# Skip existing outputs if set (recommended to avoid redoing work)
+SKIP_EXISTING = os.environ.get("SKIP_EXISTING", "0").strip() in {"1", "true", "True", "YES", "yes"}
 
 
 # ======================
@@ -84,6 +96,9 @@ if not EXCEL_PATH.exists():
 else:
     print(f"Using Excel file: {EXCEL_PATH}")
 
+print(f"Using OUTPUT_DIR: {OUTPUT_DIR}")
+print(f"SKIP_EXISTING: {SKIP_EXISTING}")
+
 
 # ======================
 # Helper functions: sheet/session naming
@@ -91,36 +106,42 @@ else:
 
 def get_session_id_from_sheet(sheet_name: str) -> str:
     """
-    Convert sheet name like '112625F1' or '112625F1_B' into a session id string:
+    Convert sheet name into a session id string.
 
-        '112625F1'   -> '112625 F1'
-        '112625F1_B' -> '112625 F1_B'
-
-    The internal session id is used for matching and logging.
+    Supports:
+      - '112625F1'       -> '112625 F1'
+      - '112625F1_B'     -> '112625 F1_B'
+      - '121325M3_B-1'   -> '121325 M3_B-1'
+      - '121325M3_B_2'   -> '121325 M3_B-2'
     """
-    clean = sheet_name.replace("-", "").replace(" ", "")
-    m = re.match(r"^(\d{6})([MF]\d)(?:_B)?$", clean, re.IGNORECASE)
+    if not isinstance(sheet_name, str) or not sheet_name.strip():
+        return None
+
+    clean = sheet_name.replace(" ", "")  # keep '-' so we can interpret it
+    m = re.match(
+        r"^(\d{6})([MF]\d)(?:_B(?:[-_]?(\d+))?)?$",
+        clean,
+        re.IGNORECASE,
+    )
     if not m:
         return None
+
     date = m.group(1)
     rat = m.group(2).upper()
-    # booster pattern: B, B-1, B-2 ...
-    booster_match = re.search(r"\bB[-_]?(\d+)?\b", path.name, re.IGNORECASE)
+    b_num = m.group(3)
 
-    if booster_match:
-        b_num = booster_match.group(1)
-        if b_num:
-            session_id = f"{date} {rat}_B-{b_num}"
-        else:
-            session_id = f"{date} {rat}_B"
+    if b_num:
+        return f"{date} {rat}_B-{b_num}"
+    elif "_B" in clean.upper():
+        return f"{date} {rat}_B"
     else:
-        session_id = f"{date} {rat}"
-    return f"{date} {rat}"
+        return f"{date} {rat}"
 
 
 def normalize_session_for_filename(session_id: str) -> str:
     """
     Normalize session id like '112625 F1_B' to '112625F1_B' for filenames.
+    Keeps hyphens for B-1 (e.g., '121325 M3_B-1' -> '121325M3_B-1').
     """
     return session_id.replace(" ", "")
 
@@ -144,13 +165,12 @@ def parse_hms_to_seconds(s: str) -> float:
             m = int(parts[0])
             sec = float(parts[1])
             return m * 60 + sec
-        elif len(parts) == 3:
+        if len(parts) == 3:
             h = int(parts[0])
             m = int(parts[1])
             sec = float(parts[2])
             return h * 3600 + m * 60 + sec
-        else:
-            return None
+        return None
     except ValueError:
         return None
 
@@ -203,7 +223,7 @@ def label_time_by_intervals(t_sec: float, intervals: List[Tuple[float, float]]) 
     Return 1 if t_sec falls inside any seizure interval, else 0.
     """
     for (start, end) in intervals:
-        if t_sec >= start and t_sec <= end:
+        if start <= t_sec <= end:
             return 1
     return 0
 
@@ -218,14 +238,16 @@ def scan_videos(raw_video_dir: Path) -> Dict[str, Dict[str, Path]]:
 
         sessions[session_id][view] = video_path
 
-    session_id example: "112625 F1", "112625 F1_B"
-    view is one of "TOP", "SIDE", "SIDE2".
+    session_id example:
+      - "112625 F1"
+      - "112625 F1_B"
+      - "121325 M3_B-1"
     """
     sessions: Dict[str, Dict[str, Path]] = {}
 
-    # Pattern: POST KA112625 F1 or POST KA112625 F1 B
+    # Base pattern: POST KA112625 F1 ...
     pattern = re.compile(
-        r"POST\s*KA(\d{6})\s*([MF]\d)(?:\s*B)?",
+        r"POST\s*KA(\d{6})\s*([MF]\d)",
         re.IGNORECASE,
     )
 
@@ -246,9 +268,15 @@ def scan_videos(raw_video_dir: Path) -> Dict[str, Dict[str, Path]]:
 
         date = match.group(1)
         rat = match.group(2).upper()
-        is_booster = " b-" in lower or " b." in lower or " b " in lower
-        if is_booster:
-            session_id = f"{date} {rat}_B"
+
+        # Booster pattern: B, B-1, B-2, B_2
+        booster_match = re.search(r"\bB(?:[-_]?(\d+))?\b", path.name, re.IGNORECASE)
+        if booster_match:
+            b_num = booster_match.group(1)
+            if b_num:
+                session_id = f"{date} {rat}_B-{b_num}"
+            else:
+                session_id = f"{date} {rat}_B"
         else:
             session_id = f"{date} {rat}"
 
@@ -278,12 +306,6 @@ def scan_videos(raw_video_dir: Path) -> Dict[str, Dict[str, Path]]:
 def scan_excel_sessions(excel_path: Path) -> Dict[str, str]:
     """
     Scan Excel file and map session_id -> sheet_name.
-
-    Returns
-    -------
-    session_to_sheet : dict
-        Keys are session ids like "112625 F1" or "112625 F1_B",
-        values are original sheet names like "112625F1_B".
     """
     session_to_sheet: Dict[str, str] = {}
 
@@ -319,10 +341,6 @@ def print_session_match_summary(video_sessions: Dict[str, Dict[str, Path]],
                                 excel_sessions: Dict[str, str]) -> List[str]:
     """
     Print a summary showing which sessions have both videos and Excel sheets.
-
-    Returns
-    -------
-    common_sessions : list of session ids that have both video and Excel.
     """
     video_keys = set(video_sessions.keys())
     excel_keys = set(excel_sessions.keys())
@@ -367,10 +385,6 @@ def make_sequences_from_frames(
 
     X_frames : (N_frames, H, W) or (N_frames, H, W, C)
     y_frames : (N_frames,) or (N_frames, 1) with 0/1 labels.
-
-    Returns:
-        X_seq : (N_seq, T, H, W, C)
-        y_seq : (N_seq,)
     """
     X = X_frames
     y = y_frames
@@ -383,8 +397,7 @@ def make_sequences_from_frames(
         raise ValueError(f"X and y have different number of frames: {n_frames} vs {y.shape[0]}")
 
     if X.ndim == 3:
-        # (N, H, W) -> (N, H, W, 1)
-        X = X[..., np.newaxis]
+        X = X[..., np.newaxis]  # (N, H, W, 1)
 
     sequences: List[np.ndarray] = []
     labels: List[int] = []
@@ -427,6 +440,13 @@ def make_sequences_from_frames(
     return X_seq, y_seq
 
 
+def outputs_exist(session_id: str, view: str) -> bool:
+    norm_sess = normalize_session_for_filename(session_id)
+    x_out = OUTPUT_DIR / f"X_SEQ_{view}_{norm_sess}.npy"
+    y_out = OUTPUT_DIR / f"y_SEQ_{view}_{norm_sess}.npy"
+    return x_out.exists() and y_out.exists()
+
+
 def process_session_view(
     session_id: str,
     view: str,
@@ -438,15 +458,28 @@ def process_session_view(
 ) -> Dict[str, int]:
     """
     For a given session and view:
-
-    - Open the video.
-    - Sample frames at 1 fps.
-    - Convert to grayscale and resize to 128x128.
-    - Label each frame based on seizure intervals.
-    - Build sequences and save X_SEQ and y_SEQ npy files.
-
-    Returns a small dict with counts for manifest logging.
+    - Sample frames at 1 fps
+    - Grayscale + resize
+    - Label frames by intervals
+    - Build sequences
+    - Save npy files
     """
+    norm_sess = normalize_session_for_filename(session_id)
+    x_out = OUTPUT_DIR / f"X_SEQ_{view}_{norm_sess}.npy"
+    y_out = OUTPUT_DIR / f"y_SEQ_{view}_{norm_sess}.npy"
+
+    if SKIP_EXISTING and x_out.exists() and y_out.exists():
+        print(f"\n[SKIP] Outputs exist for {session_id} {view}: {x_out.name}, {y_out.name}")
+        return {
+            "session_id": session_id,
+            "view": view,
+            "frames": 0,
+            "seq_samples": 0,
+            "pos_frames": 0,
+            "pos_sequences": 0,
+            "skipped": 1,
+        }
+
     print(f"\nProcessing session {session_id}, view {view}")
     print(f"  Video: {video_path}")
 
@@ -494,6 +527,7 @@ def process_session_view(
             "seq_samples": 0,
             "pos_frames": 0,
             "pos_sequences": 0,
+            "skipped": 0,
         }
 
     frames_arr = np.stack(frames, axis=0)  # (N_frames, H, W)
@@ -512,11 +546,6 @@ def process_session_view(
         label_mode=label_mode,
     )
 
-    norm_sess = normalize_session_for_filename(session_id)
-
-    x_out = OUTPUT_DIR / f"X_SEQ_{view}_{norm_sess}.npy"
-    y_out = OUTPUT_DIR / f"y_SEQ_{view}_{norm_sess}.npy"
-
     np.save(x_out, X_seq)
     np.save(y_out, y_seq)
 
@@ -530,6 +559,7 @@ def process_session_view(
         "seq_samples": int(X_seq.shape[0]),
         "pos_frames": int(np.sum(labels_arr == 1)),
         "pos_sequences": int(np.sum(y_seq == 1)),
+        "skipped": 0,
     }
 
 
@@ -540,15 +570,7 @@ def process_session_view(
 def main():
     """
     Main entry point.
-
-    Workflow:
-        - Scan videos and Excel for sessions
-        - Print match summary
-        - Optionally filter to a subset of sessions via SESSIONS env var
-        - For each session+view, build sequence npy files
-        - Append results to manifest_sessions.json
     """
-    # Scan videos and Excel
     video_sessions = scan_videos(RAW_VIDEO_DIR)
     excel_sessions = scan_excel_sessions(EXCEL_PATH)
     common_sessions = print_session_match_summary(video_sessions, excel_sessions)
@@ -557,8 +579,7 @@ def main():
         print("[ERROR] No sessions with both video and Excel to process.")
         return
 
-    # Optional: environment variable to restrict sessions (simple mechanism)
-    # Example: export SESSIONS="112625 F1,112625 F1_B"
+    # Optional: restrict sessions via env var
     sessions_env = os.environ.get("SESSIONS", "").strip()
     if sessions_env:
         requested = {s.strip() for s in sessions_env.split(",") if s.strip()}
@@ -579,7 +600,6 @@ def main():
 
     manifest_entries: List[Dict[str, int]] = []
 
-    # Process each session
     for session_id in tqdm(target_sessions, desc="Sessions"):
         sheet_name = excel_sessions[session_id]
         intervals = load_seizure_intervals(EXCEL_PATH, sheet_name)
@@ -605,7 +625,7 @@ def main():
             )
             manifest_entries.append(stats)
 
-    # Update manifest
+    # Update manifest (append-only)
     if manifest_entries:
         try:
             if MANIFEST_PATH.exists():
@@ -629,3 +649,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

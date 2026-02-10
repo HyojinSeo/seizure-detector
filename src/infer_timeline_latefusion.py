@@ -95,7 +95,10 @@ def find_view_files_by_session(raw_video_dir: Path, session: str) -> Dict[str, P
 
     date = parts[0].replace("KA", "")
     animal = parts[1]
-    booster = (len(parts) >= 3 and parts[2] == "B")
+    (len(parts) >= 3 and parts[2].startswith("B"))  # B, B-1, B-2
+
+    def has_booster_tag(filename_lower: str) -> bool:
+        return f"{animal.lower()} b" in filename_lower
 
     # Build a tolerant matcher (spaces/dashes don’t matter)
     def is_match(p: Path, view_sub: str) -> bool:
@@ -114,11 +117,11 @@ def find_view_files_by_session(raw_video_dir: Path, session: str) -> Dict[str, P
 
         if booster:
             # require booster indicator near animal (e.g., "M2 B")
-            if f"{animal.lower()} b" not in name:
+            if not has_booster_tag(name):
                 return False
         else:
             # avoid mixing booster files
-            if f"{animal.lower()} b" in name:
+            if has_booster_tag(name):
                 return False
 
         return True
@@ -207,6 +210,7 @@ def main():
 
     # Predict
     model = tf.keras.models.load_model(args.model_path)
+    X_seq = {k: X_seq[k] for k in ["TOP", "SIDE", "SIDE2"] if k in X_seq}
     probs = model.predict(X_seq, batch_size=args.batch_size, verbose=1).reshape(-1)  # (Nseq,)
 
     # Convert to intervals
