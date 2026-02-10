@@ -74,13 +74,15 @@ def make_sequences(X_frames: np.ndarray, seq_len: int, stride: int) -> np.ndarra
 def find_view_files_by_session(raw_video_dir: Path, session: str) -> Dict[str, Path]:
     """
     session examples:
-      "KA010626 M2"
-      "KA010626 M2 B"
+      "KA010626 F1"
+      "KA010626 F1 B"
+      "KA010626 F1 B-1"   (optional)
+      "010626 F1"         (KA prefix optional)
 
     Searches raw_video_dir for:
-      POST KA010626 M2 ... -webcamup(.mp4)
-      POST KA010626 M2 ... -webcamside1(.mp4)
-      POST KA010626 M2 ... -webcamside2(.mp4)
+      POST KA010626 F1 ... -webcamup(.mp4)
+      POST KA010626 F1 ... -webcamside1(.mp4)
+      POST KA010626 F1 ... -webcamside2(.mp4)
     """
     s = session.strip().upper()
 
@@ -88,19 +90,27 @@ def find_view_files_by_session(raw_video_dir: Path, session: str) -> Dict[str, P
     if not s.startswith("KA"):
         s = "KA" + s
 
-    # Split like: KA010626 M2 B -> date=010626, animal=M2, booster=True
     parts = s.split()
     if len(parts) < 2:
-        raise ValueError('Session must look like "KA010626 M2" or "KA010626 M2 B"')
+        raise ValueError('Session must look like "KA010626 F1" or "KA010626 F1 B"')
 
     date = parts[0].replace("KA", "")
     animal = parts[1]
-    (len(parts) >= 3 and parts[2].startswith("B"))  # B, B-1, B-2
 
-    def has_booster_tag(filename_lower: str) -> bool:
-        return f"{animal.lower()} b" in filename_lower
+    # booster can be: B, B-1, B_2, etc.
+    booster = False
+    booster_num = None
+    if len(parts) >= 3 and parts[2].startswith("B"):
+        booster = True
+        # handle "B-1" or "B_1"
+        if "-" in parts[2]:
+            booster_num = parts[2].split("-", 1)[1]
+        elif "_" in parts[2]:
+            booster_num = parts[2].split("_", 1)[1]
+        elif len(parts) >= 4 and parts[2] == "B" and re.match(r"^\d+$", parts[3]):
+            # handle "B 1"
+            booster_num = parts[3]
 
-    # Build a tolerant matcher (spaces/dashes don’t matter)
     def is_match(p: Path, view_sub: str) -> bool:
         name = p.name.lower()
 
@@ -115,35 +125,36 @@ def find_view_files_by_session(raw_video_dir: Path, session: str) -> Dict[str, P
         if view_sub not in name:
             return False
 
+        # Booster filtering
         if booster:
-            # require booster indicator near animal (e.g., "M2 B")
-            if not has_booster_tag(name):
+            # must contain "<animal> b" (e.g., "f1 b", "f1 b-1")
+            if f"{animal.lower()} b" not in name:
                 return False
+            if booster_num is not None:
+                # require specific booster id if given
+                if f"b-{booster_num}".lower() not in name and f"b_{booster_num}".lower() not in name:
+                    return False
         else:
             # avoid mixing booster files
-            if has_booster_tag(name):
+            if f"{animal.lower()} b" in name:
                 return False
 
         return True
 
     out: Dict[str, Path] = {}
     for v, sub in VIEW_SUBSTR.items():
-        cand = [
-            p for p in raw_video_dir.iterdir()
-            if p.is_file() and is_match(p, sub)
-        ]
+        cand = [p for p in raw_video_dir.iterdir() if p.is_file() and is_match(p, sub)]
 
         if len(cand) != 1:
             raise RuntimeError(
                 f"Expected exactly 1 match for {v} in {raw_video_dir} "
                 f"(session={session}). Found {len(cand)}: "
-                f"{[c.name for c in cand[:5]]}"
+                f"{[c.name for c in cand[:10]]}"
             )
 
         out[v] = cand[0]
 
     return out
-
 
 
 def probs_to_intervals(probs: np.ndarray, threshold: float) -> List[Tuple[float, float, float]]:
