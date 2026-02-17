@@ -1,4 +1,3 @@
-cat > src/combine_latefusion.py <<'PY'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -281,5 +280,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-PY
-chmod +x src/combine_latefusion.py
