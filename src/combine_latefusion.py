@@ -1,3 +1,4 @@
+cat > src/combine_latefusion.py <<'PY'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -20,8 +21,6 @@ Output:
     meta.json
 
 Examples:
-  python -m src.combine_latefusion --exp_name top_only --views TOP
-  python -m src.combine_latefusion --exp_name top_side --views TOP SIDE
   python -m src.combine_latefusion --exp_name all3 --views TOP SIDE SIDE2 --allow_trim_to_min
 """
 
@@ -30,7 +29,7 @@ import csv
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 import numpy as np
 from numpy.lib.format import open_memmap
@@ -43,7 +42,6 @@ OUT_ROOT = PROJECT_ROOT / "data" / "processed_seq" / "latefusion"
 
 def list_tokens(sess_dir: Path) -> List[str]:
     tokens = set()
-    # Token discovery uses TOP by default (same as your original).
     for p in sess_dir.glob("X_SEQ_TOP_*.npy"):
         m = re.match(r"X_SEQ_TOP_(.+)\.npy$", p.name)
         if m:
@@ -57,32 +55,28 @@ def load_view_mmap(sess_dir: Path, view: str, token: str) -> Tuple[np.ndarray, n
     if not x_path.exists() or not y_path.exists():
         raise FileNotFoundError(f"Missing {view} files for {token}: {x_path.name}, {y_path.name}")
 
-    # mmap_mode='r' avoids loading whole array into RAM
     X = np.load(x_path, mmap_mode="r")
     y = np.load(y_path, mmap_mode="r").reshape(-1)
 
     # Ensure X is (N,T,H,W,1)
     if X.ndim == 4:
-        # (N,T,H,W) -> (N,T,H,W,1)
-        # This creates a view; later we materialize per-session slice anyway.
         X = X[..., np.newaxis]
     if X.ndim != 5:
         raise ValueError(f"Unexpected X shape for {view} {token}: {X.shape}")
 
-    return X, np.array(y, dtype=np.int64)  # y is small; load into RAM safely
+    # y는 작으니 RAM으로 올려도 OK
+    return X, np.array(y, dtype=np.int64)
 
 
 def should_scale_0_1(X: np.ndarray) -> bool:
     """
     Decide whether to scale 0..255 -> 0..1.
-    We avoid scanning entire X; sample a tiny subset.
+    Only samples a tiny subset to avoid scanning everything.
     """
     try:
         if X.dtype == np.uint8:
             return True
-        # sample up to first 8 samples only
-        n = int(X.shape[0])
-        k = min(8, n)
+        k = min(2, int(X.shape[0]))
         if k <= 0:
             return False
         sample = np.array(X[:k], dtype=np.float32)
@@ -122,6 +116,12 @@ def main() -> None:
         action="store_true",
         help="If N differs across views for a session, trim to min N instead of crashing.",
     )
+    ap.add_argument(
+        "--chunk",
+        type=int,
+        default=64,
+        help="Write in chunks to avoid huge RAM spikes (default: 64).",
+    )
     args = ap.parse_args()
 
     if not SESS_DIR.exists():
@@ -146,6 +146,7 @@ def main() -> None:
     N_total = 0
     ref_T = ref_H = ref_W = ref_C = None
     scale_flags: Dict[str, bool] = {}
+    pos_total = 0
 
     for token in tokens:
         Xv: Dict[str, np.ndarray] = {}
@@ -162,7 +163,6 @@ def main() -> None:
 
         # N consistency across views
         Ns = {v: int(Xv[v].shape[0]) for v in views}
-        n_use = None
         if len(set(Ns.values())) == 1:
             n_use = list(Ns.values())[0]
         else:
@@ -185,17 +185,12 @@ def main() -> None:
             if v not in scale_flags:
                 scale_flags[v] = should_scale_0_1(Xv[v])
 
-        # store plan
-        session_plan.append(
-            {
-                "token": token,
-                "n_use": int(n_use),
-                "pos": int(np.sum(y0[:n_use] == 1)),
-            }
-        )
+        pos = int(np.sum(y0[:n_use] == 1))
+        session_plan.append({"token": token, "n_use": int(n_use), "pos": pos})
         N_total += int(n_use)
+        pos_total += pos
 
-        print(f"[PLAN] {token}: use N={int(n_use)}, pos={int(np.sum(y0[:n_use] == 1))}")
+        print(f"[PLAN] {token}: use N={int(n_use)}, pos={pos}")
 
     if N_total <= 0:
         raise RuntimeError("Empty dataset after planning.")
@@ -203,7 +198,6 @@ def main() -> None:
     # --------------------------
     # Create memmap-backed .npy outputs
     # --------------------------
-    # X_{view}.npy: float32
     X_out: Dict[str, np.ndarray] = {}
     for v in views:
         X_out[v] = open_memmap(
@@ -213,7 +207,6 @@ def main() -> None:
             shape=(N_total, ref_T, ref_H, ref_W, ref_C),
         )
 
-    # y.npy: int64
     y_out = open_memmap(
         filename=str(out_dir / "y.npy"),
         mode="w+",
@@ -225,10 +218,11 @@ def main() -> None:
     write_index_header(index_csv)
 
     # --------------------------
-    # PASS 2: write data incrementally
+    # PASS 2: write data incrementally (chunked)
     # --------------------------
     global_row = 0
     sessions_included: List[str] = []
+    chunk = max(1, int(args.chunk))
 
     for item in session_plan:
         token = str(item["token"])
@@ -241,24 +235,22 @@ def main() -> None:
 
         y0 = yv[views[0]][:n_use]
         y_out[global_row : global_row + n_use] = y0
-
-        # index rows streamed to CSV (no big RAM list)
         append_index_rows(index_csv, global_row, token, y0)
 
-        for v in views:
-            Xi = Xv[v][:n_use]  # (N,T,H,W,1)
-            # materialize as float32 slice for writing
-            Xi_f = np.array(Xi, dtype=np.float32, copy=False)
-            if scale_flags.get(v, False):
-                Xi_f = Xi_f / 255.0
-            X_out[v][global_row : global_row + n_use] = Xi_f
+        # chunk write to avoid huge RAM spikes
+        for start in range(0, n_use, chunk):
+            end = min(n_use, start + chunk)
+            for v in views:
+                Xi = Xv[v][start:end]  # mmap slice
+                Xi_f = np.asarray(Xi, dtype=np.float32)  # small chunk -> OK
+                if scale_flags.get(v, False):
+                    Xi_f = Xi_f / 255.0
+                X_out[v][global_row + start : global_row + end] = Xi_f
 
         sessions_included.append(token)
-
         print(f"[OK] {token}: wrote rows {global_row}..{global_row + n_use - 1} (N={n_use})")
         global_row += n_use
 
-    # flush memmaps
     for v in views:
         X_out[v].flush()
     y_out.flush()
@@ -267,9 +259,10 @@ def main() -> None:
         "exp_name": args.exp_name,
         "views": views,
         "num_samples": int(N_total),
-        "pos_samples": int(np.sum(np.array(y_out, dtype=np.int64) == 1)),
+        "pos_samples": int(pos_total),
         "sessions_included": sessions_included,
         "scale_to_0_1": {v: bool(scale_flags.get(v, False)) for v in views},
+        "chunk": int(chunk),
     }
     for v in views:
         meta[f"shape_{v}"] = list(X_out[v].shape)
@@ -288,3 +281,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+PY
+chmod +x src/combine_latefusion.py
