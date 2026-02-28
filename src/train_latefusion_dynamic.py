@@ -113,10 +113,6 @@ def make_dataset(
 
 
 def build_model(views: List[str], seq_len: int) -> tf.keras.Model:
-    """
-    예시용 간단 late-fusion (각 view를 작은 CNN으로 인코딩 후 concat)
-    기존 all3 모델 아키텍처가 이미 있다면 그걸 그대로 가져오시는 걸 추천합니다.
-    """
     inputs = {}
     feats = []
 
@@ -167,7 +163,6 @@ def main():
 
     print(f"[INFO] tokens={len(tokens)}, views={args.views}, seq_len={args.seq_len}, stride={args.stride}")
 
-    # NOTE: 여기서 train/val split은 간단히 90/10 예시
     n = len(tokens)
     n_train = max(1, int(round(n * 0.9)))
     train_tokens = tokens[:n_train]
