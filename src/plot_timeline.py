@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import re
+from pathlib import Path
 from typing import List, Tuple
 
 import pandas as pd
@@ -27,12 +29,51 @@ def sec_to_hhmmss(sec: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def infer_sheet_name(pred_xlsx: str) -> str:
+    """
+    Infer Excel sheet name from prediction filename.
+
+    Examples:
+      010626_F1_pred.xlsx   -> 010626F1
+      010626F1_pred.xlsx    -> 010626F1
+      121325_M3_B_pred.xlsx -> 121325M3_B
+      121325_M3_B-1_pred.xlsx -> 121325M3_B-1
+    """
+    stem = Path(pred_xlsx).stem  # e.g. 010626_F1_pred
+    stem = re.sub(r"_pred$", "", stem, flags=re.IGNORECASE)
+
+    # 010626_F1 -> 010626F1
+    m = re.match(r"^(\d{6})[_ ]?([MF]\d)(.*)$", stem, flags=re.IGNORECASE)
+    if not m:
+        raise ValueError(f"Could not infer sheet name from prediction file: {pred_xlsx}")
+
+    date = m.group(1)
+    rat = m.group(2).upper()
+    suffix = m.group(3).strip()
+
+    # suffix examples:
+    # ""           -> ""
+    # "_B"         -> "_B"
+    # "_B-1"       -> "_B-1"
+    # "_B_1"       -> "_B_1"
+    if suffix:
+        suffix = suffix.replace(" ", "")
+    return f"{date}{rat}{suffix}"
+
+
 def load_gt_intervals_from_sheet(gt_xlsx: str, sheet: str) -> List[Tuple[float, float]]:
     """
     GT Excel (multi-sheet) format:
       column 'Time' containing strings like "0:04 - 0:08" or "1:00:14 - 1:00:22"
     """
-    df = pd.read_excel(gt_xlsx, sheet_name=sheet)
+    xls = pd.ExcelFile(gt_xlsx)
+    if sheet not in xls.sheet_names:
+        raise ValueError(
+            f"Sheet '{sheet}' not found in {gt_xlsx}. "
+            f"Available sheets: {xls.sheet_names}"
+        )
+
+    df = pd.read_excel(xls, sheet_name=sheet)
 
     if "Time" not in df.columns:
         raise ValueError(f"GT sheet '{sheet}' must have a 'Time' column.")
@@ -55,7 +96,7 @@ def load_gt_intervals_from_sheet(gt_xlsx: str, sheet: str) -> List[Tuple[float, 
 
 def load_pred_intervals(pred_xlsx: str) -> List[Tuple[float, float]]:
     """
-    Prediction Excel format (from infer_timeline_latefusion*.py):
+    Prediction Excel format:
       start_sec | end_sec | mean_prob | (optional) start_hms/end_hms
     """
     df = pd.read_excel(pred_xlsx)
@@ -65,7 +106,6 @@ def load_pred_intervals(pred_xlsx: str) -> List[Tuple[float, float]]:
     if "start_sec" in df.columns and "end_sec" in df.columns:
         return list(zip(df["start_sec"].astype(float), df["end_sec"].astype(float)))
 
-    # fallback
     if "start_hms" in df.columns and "end_hms" in df.columns:
         out = []
         for _, row in df.iterrows():
@@ -87,14 +127,18 @@ def plot_intervals(ax, intervals: List[Tuple[float, float]], y: float, height: f
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gt_xlsx", required=True, type=str, help="GT Excel (multi-sheet), e.g. data/seizure_stage.xlsx")
-    ap.add_argument("--sheet", required=True, type=str, help="Sheet name, e.g. 010626F1_B")
+    ap.add_argument("--gt_xlsx", required=True, type=str, help="GT Excel, e.g. data/seizure_stage.xlsx")
     ap.add_argument("--pred_xlsx", required=True, type=str, help="Prediction intervals xlsx")
     ap.add_argument("--out_png", required=True, type=str, help="Output PNG path")
+    ap.add_argument("--sheet", default=None, type=str, help="Optional explicit sheet name")
     ap.add_argument("--title", default=None, type=str, help="Optional plot title")
     args = ap.parse_args()
 
-    gt_intervals = load_gt_intervals_from_sheet(args.gt_xlsx, args.sheet)
+    # If sheet not provided, infer from pred filename
+    sheet_name = args.sheet if args.sheet else infer_sheet_name(args.pred_xlsx)
+    print(f"[INFO] Using GT sheet: {sheet_name}")
+
+    gt_intervals = load_gt_intervals_from_sheet(args.gt_xlsx, sheet_name)
     pred_intervals = load_pred_intervals(args.pred_xlsx)
 
     if not gt_intervals and not pred_intervals:
@@ -108,7 +152,6 @@ def main():
 
     fig, ax = plt.subplots(figsize=(14, 3.5))
 
-    # Label on top, Prediction below
     plot_intervals(ax, gt_intervals, y=20, height=8, label="GT (Label)")
     plot_intervals(ax, pred_intervals, y=5, height=8, label="Prediction")
 
@@ -117,7 +160,6 @@ def main():
     ax.set_yticks([9, 24])
     ax.set_yticklabels(["Prediction", "GT"])
 
-    # x ticks
     n_ticks = 10
     step = max(1, int(round(max_end / n_ticks))) if max_end > 0 else 1
     ticks = list(range(0, int(max_end) + 1, step))
@@ -125,7 +167,7 @@ def main():
     ax.set_xticklabels([sec_to_hhmmss(t) for t in ticks], rotation=0)
 
     ax.set_xlabel("Time (HH:MM:SS)")
-    ax.set_title(args.title if args.title else f"Timeline: {args.sheet} (GT vs Pred)")
+    ax.set_title(args.title if args.title else f"Timeline: {sheet_name} (GT vs Pred)")
     ax.legend(loc="upper right")
     ax.grid(True, axis="x", linewidth=0.5)
     fig.tight_layout()
@@ -135,10 +177,6 @@ def main():
     fig.savefig(out_png, dpi=200)
     print(f"[OK] Saved plot: {out_png}")
 
-    # optional: show if you want interactive
-    # plt.show()
-
 
 if __name__ == "__main__":
-    from pathlib import Path
     main()
