@@ -326,7 +326,7 @@ def main() -> None:
     for v in views:
         print(f"  - {v}: {view_files[v].name}")
 
-    model = tf.keras.models.load_model(str(model_path))
+    model = tf.keras.models.load_model(str(model_path), compile=False)
 
     seq_len = args.seq_len
     if seq_len is None:
