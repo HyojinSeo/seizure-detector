@@ -6,7 +6,7 @@ Sequence preprocessing script for seizure-detector project.
 
 End-to-end pipeline for the CNN + LSTM/GRU model:
 
-- Reads multi-view POST KA videos (TOP, SIDE, SIDE2) from ~/gcs/inputs
+- Reads multi-view POST KA videos from ~/gcs/inputs by default
 - Matches sessions to Excel sheets (seizure_stage.xlsx)
 - Extracts frames at 1 fps, grayscale, resized to 128x128
 - Labels each frame as seizure/non-seizure from Excel time intervals
@@ -14,22 +14,26 @@ End-to-end pipeline for the CNN + LSTM/GRU model:
 - Saves per-session npy files for each view (X_SEQ_*, y_SEQ_*)
 
 Supports booster sessions:
-- _B, _B-1, _B-2 (from Excel sheets) and
+- _B, _B-1, _B-2 (from Excel sheets)
 - "B", "B-1", "B-2" (from video filenames)
 
 Filtering:
-- Use env var SESSIONS="121125 F1_B,121325 M3_B-1" to run a subset only.
+- Use env var SESSIONS="121125 F1_B,121325 M3_B-1" to run a subset.
 
 Optional:
 - SKIP_EXISTING=1 to skip session+view if output npy files already exist.
 
-Author: Hyojin Seo
+Examples:
+  python src/preprocess_seq_cnn_lstm.py
+  python src/preprocess_seq_cnn_lstm.py --seq_len 32 --stride 8
+  python src/preprocess_seq_cnn_lstm.py --seq_len 32 --stride 8 --output_dir data/processed_seq/sessions_32_8
 """
 
+import argparse
 import os
 import re
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
 import cv2
@@ -39,33 +43,22 @@ from tqdm import tqdm
 
 
 # ======================
-# Configuration
+# Default configuration
 # ======================
 
-# Frame sampling parameters
 FPS_TARGET = 1
 RESIZE_SHAPE = (128, 128)
 DTYPE = np.float32
 
-# Sequence parameters
-SEQ_LEN = 16
-STRIDE = 4
-LABEL_MODE = "any"  # "any", "max", "center", "majority"
+DEFAULT_SEQ_LEN = 16
+DEFAULT_STRIDE = 4
+DEFAULT_LABEL_MODE = "any"  # "any", "max", "center", "majority"
 
-# Project paths (stable regardless of CWD)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_RAW_VIDEO_DIR = Path("~/gcs/inputs").expanduser()
+DEFAULT_EXCEL_PATH = PROJECT_ROOT / "data" / "seizure_stage.xlsx"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "processed_seq" / "sessions"
 
-# Video input folder (mount point from GCS)
-RAW_VIDEO_DIR = Path("~/gcs/inputs").expanduser()
-
-# Excel with seizure intervals
-EXCEL_PATH = PROJECT_ROOT / "data" / "seizure_stage.xlsx"
-
-# Output folder for per-session sequence npy files
-OUTPUT_DIR = PROJECT_ROOT / "data" / "processed_seq" / "sessions"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# Views to use and matching substrings in filenames
 VIEWS = ["TOP", "SIDE", "SIDE2"]
 VIEW_CONFIG = {
     "TOP": "webcamup",
@@ -73,38 +66,16 @@ VIEW_CONFIG = {
     "SIDE2": "webcamside2",
 }
 
-# Allowed video extensions
 VALID_EXTS = (".mp4",)
 
-# Manifest file to keep track of processed sessions (append-only)
-MANIFEST_PATH = OUTPUT_DIR / "manifest_sessions.json"
-
-# Skip existing outputs if set (recommended to avoid redoing work)
 SKIP_EXISTING = os.environ.get("SKIP_EXISTING", "0").strip() in {"1", "true", "True", "YES", "yes"}
-
-
-# ======================
-# Sanity checks
-# ======================
-
-if not RAW_VIDEO_DIR.is_dir():
-    raise FileNotFoundError(f"RAW_VIDEO_DIR not found: {RAW_VIDEO_DIR}")
-print(f"Using RAW_VIDEO_DIR: {RAW_VIDEO_DIR}")
-
-if not EXCEL_PATH.exists():
-    print(f"Warning: Excel file not found: {EXCEL_PATH}")
-else:
-    print(f"Using Excel file: {EXCEL_PATH}")
-
-print(f"Using OUTPUT_DIR: {OUTPUT_DIR}")
-print(f"SKIP_EXISTING: {SKIP_EXISTING}")
 
 
 # ======================
 # Helper functions: sheet/session naming
 # ======================
 
-def get_session_id_from_sheet(sheet_name: str) -> str:
+def get_session_id_from_sheet(sheet_name: str) -> Optional[str]:
     """
     Convert sheet name into a session id string.
 
@@ -117,7 +88,7 @@ def get_session_id_from_sheet(sheet_name: str) -> str:
     if not isinstance(sheet_name, str) or not sheet_name.strip():
         return None
 
-    clean = sheet_name.replace(" ", "")  # keep '-' so we can interpret it
+    clean = sheet_name.replace(" ", "")
     m = re.match(
         r"^(\d{6})([MF]\d)(?:_B(?:[-_]?(\d+))?)?$",
         clean,
@@ -150,7 +121,7 @@ def normalize_session_for_filename(session_id: str) -> str:
 # Helper functions: time parsing and intervals
 # ======================
 
-def parse_hms_to_seconds(s: str) -> float:
+def parse_hms_to_seconds(s: str) -> Optional[float]:
     """
     Parse a time string like "MM:SS" or "HH:MM:SS" into seconds.
     """
@@ -175,7 +146,7 @@ def parse_hms_to_seconds(s: str) -> float:
         return None
 
 
-def parse_time_interval(interval_str: str) -> Tuple[float, float]:
+def parse_time_interval(interval_str: str) -> Tuple[Optional[float], Optional[float]]:
     """
     Parse a time interval string like "20:28 - 20:57" into (start_sec, end_sec).
     """
@@ -222,7 +193,7 @@ def label_time_by_intervals(t_sec: float, intervals: List[Tuple[float, float]]) 
     """
     Return 1 if t_sec falls inside any seizure interval, else 0.
     """
-    for (start, end) in intervals:
+    for start, end in intervals:
         if start <= t_sec <= end:
             return 1
     return 0
@@ -245,7 +216,6 @@ def scan_videos(raw_video_dir: Path) -> Dict[str, Dict[str, Path]]:
     """
     sessions: Dict[str, Dict[str, Path]] = {}
 
-    # Base pattern: POST KA112625 F1 ...
     pattern = re.compile(
         r"POST\s*KA(\d{6})\s*([MF]\d)",
         re.IGNORECASE,
@@ -269,7 +239,6 @@ def scan_videos(raw_video_dir: Path) -> Dict[str, Dict[str, Path]]:
         date = match.group(1)
         rat = match.group(2).upper()
 
-        # Booster pattern: B, B-1, B-2, B_2
         booster_match = re.search(r"\bB(?:[-_]?(\d+))?\b", path.name, re.IGNORECASE)
         if booster_match:
             b_num = booster_match.group(1)
@@ -280,7 +249,6 @@ def scan_videos(raw_video_dir: Path) -> Dict[str, Dict[str, Path]]:
         else:
             session_id = f"{date} {rat}"
 
-        # Determine view from substring
         view = None
         for v_name, substr in VIEW_CONFIG.items():
             if substr in lower:
@@ -337,8 +305,10 @@ def scan_excel_sessions(excel_path: Path) -> Dict[str, str]:
     return session_to_sheet
 
 
-def print_session_match_summary(video_sessions: Dict[str, Dict[str, Path]],
-                                excel_sessions: Dict[str, str]) -> List[str]:
+def print_session_match_summary(
+    video_sessions: Dict[str, Dict[str, Path]],
+    excel_sessions: Dict[str, str],
+) -> List[str]:
     """
     Print a summary showing which sessions have both videos and Excel sheets.
     """
@@ -374,7 +344,7 @@ def print_session_match_summary(video_sessions: Dict[str, Dict[str, Path]],
 # ======================
 
 def make_sequences_from_frames(
-    X_frames: np.ndarray,
+    x_frames: np.ndarray,
     y_frames: np.ndarray,
     seq_len: int,
     stride: int,
@@ -383,10 +353,10 @@ def make_sequences_from_frames(
     """
     Build sliding-window sequences from frame-level arrays.
 
-    X_frames : (N_frames, H, W) or (N_frames, H, W, C)
+    x_frames : (N_frames, H, W) or (N_frames, H, W, C)
     y_frames : (N_frames,) or (N_frames, 1) with 0/1 labels.
     """
-    X = X_frames
+    X = x_frames
     y = y_frames
 
     if y.ndim > 1:
@@ -428,22 +398,22 @@ def make_sequences_from_frames(
             f"for n_frames={n_frames}."
         )
 
-    X_seq = np.stack(sequences, axis=0).astype(DTYPE)
+    x_seq = np.stack(sequences, axis=0).astype(DTYPE)
     y_seq = np.array(labels, dtype=np.int64)
 
     print(
-        f"Built {X_seq.shape[0]} sequences of length {seq_len} "
+        f"Built {x_seq.shape[0]} sequences of length {seq_len} "
         f"from {n_frames} frames (stride={stride}). "
         f"Positive sequences: {np.sum(y_seq == 1)} / {y_seq.shape[0]}"
     )
 
-    return X_seq, y_seq
+    return x_seq, y_seq
 
 
-def outputs_exist(session_id: str, view: str) -> bool:
+def outputs_exist(session_id: str, view: str, output_dir: Path) -> bool:
     norm_sess = normalize_session_for_filename(session_id)
-    x_out = OUTPUT_DIR / f"X_SEQ_{view}_{norm_sess}.npy"
-    y_out = OUTPUT_DIR / f"y_SEQ_{view}_{norm_sess}.npy"
+    x_out = output_dir / f"X_SEQ_{view}_{norm_sess}.npy"
+    y_out = output_dir / f"y_SEQ_{view}_{norm_sess}.npy"
     return x_out.exists() and y_out.exists()
 
 
@@ -455,6 +425,7 @@ def process_session_view(
     seq_len: int,
     stride: int,
     label_mode: str,
+    output_dir: Path,
 ) -> Dict[str, int]:
     """
     For a given session and view:
@@ -465,8 +436,8 @@ def process_session_view(
     - Save npy files
     """
     norm_sess = normalize_session_for_filename(session_id)
-    x_out = OUTPUT_DIR / f"X_SEQ_{view}_{norm_sess}.npy"
-    y_out = OUTPUT_DIR / f"y_SEQ_{view}_{norm_sess}.npy"
+    x_out = output_dir / f"X_SEQ_{view}_{norm_sess}.npy"
+    y_out = output_dir / f"y_SEQ_{view}_{norm_sess}.npy"
 
     if SKIP_EXISTING and x_out.exists() and y_out.exists():
         print(f"\n[SKIP] Outputs exist for {session_id} {view}: {x_out.name}, {y_out.name}")
@@ -530,15 +501,15 @@ def process_session_view(
             "skipped": 0,
         }
 
-    frames_arr = np.stack(frames, axis=0)  # (N_frames, H, W)
-    labels_arr = np.array(labels, dtype=np.int64)  # (N_frames,)
+    frames_arr = np.stack(frames, axis=0)
+    labels_arr = np.array(labels, dtype=np.int64)
 
     print(
         f"  Collected {frames_arr.shape[0]} frames. "
         f"Positive frames: {np.sum(labels_arr == 1)}"
     )
 
-    X_seq, y_seq = make_sequences_from_frames(
+    x_seq, y_seq = make_sequences_from_frames(
         frames_arr,
         labels_arr,
         seq_len=seq_len,
@@ -546,7 +517,7 @@ def process_session_view(
         label_mode=label_mode,
     )
 
-    np.save(x_out, X_seq)
+    np.save(x_out, x_seq)
     np.save(y_out, y_seq)
 
     print(f"  Saved X_seq to: {x_out}")
@@ -556,7 +527,7 @@ def process_session_view(
         "session_id": session_id,
         "view": view,
         "frames": int(frames_arr.shape[0]),
-        "seq_samples": int(X_seq.shape[0]),
+        "seq_samples": int(x_seq.shape[0]),
         "pos_frames": int(np.sum(labels_arr == 1)),
         "pos_sequences": int(np.sum(y_seq == 1)),
         "skipped": 0,
@@ -568,18 +539,51 @@ def process_session_view(
 # ======================
 
 def main():
-    """
-    Main entry point.
-    """
-    video_sessions = scan_videos(RAW_VIDEO_DIR)
-    excel_sessions = scan_excel_sessions(EXCEL_PATH)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seq_len", type=int, default=DEFAULT_SEQ_LEN)
+    ap.add_argument("--stride", type=int, default=DEFAULT_STRIDE)
+    ap.add_argument(
+        "--label_mode",
+        type=str,
+        default=DEFAULT_LABEL_MODE,
+        choices=["any", "max", "center", "majority"],
+    )
+    ap.add_argument("--raw_video_dir", type=str, default=str(DEFAULT_RAW_VIDEO_DIR))
+    ap.add_argument("--excel_path", type=str, default=str(DEFAULT_EXCEL_PATH))
+    ap.add_argument("--output_dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
+    args = ap.parse_args()
+
+    seq_len = int(args.seq_len)
+    stride = int(args.stride)
+    label_mode = args.label_mode
+    raw_video_dir = Path(args.raw_video_dir).expanduser()
+    excel_path = Path(args.excel_path).expanduser()
+    output_dir = Path(args.output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "manifest_sessions.json"
+
+    if not raw_video_dir.is_dir():
+        raise FileNotFoundError(f"RAW_VIDEO_DIR not found: {raw_video_dir}")
+
+    print(f"Using RAW_VIDEO_DIR: {raw_video_dir}")
+
+    if not excel_path.exists():
+        print(f"Warning: Excel file not found: {excel_path}")
+    else:
+        print(f"Using Excel file: {excel_path}")
+
+    print(f"Using OUTPUT_DIR: {output_dir}")
+    print(f"SKIP_EXISTING: {SKIP_EXISTING}")
+    print(f"[CONFIG] seq_len={seq_len}, stride={stride}, label_mode={label_mode}")
+
+    video_sessions = scan_videos(raw_video_dir)
+    excel_sessions = scan_excel_sessions(excel_path)
     common_sessions = print_session_match_summary(video_sessions, excel_sessions)
 
     if not common_sessions:
         print("[ERROR] No sessions with both video and Excel to process.")
         return
 
-    # Optional: restrict sessions via env var
     sessions_env = os.environ.get("SESSIONS", "").strip()
     if sessions_env:
         requested = {s.strip() for s in sessions_env.split(",") if s.strip()}
@@ -602,7 +606,7 @@ def main():
 
     for session_id in tqdm(target_sessions, desc="Sessions"):
         sheet_name = excel_sessions[session_id]
-        intervals = load_seizure_intervals(EXCEL_PATH, sheet_name)
+        intervals = load_seizure_intervals(excel_path, sheet_name)
         if not intervals:
             print(f"[WARN] No intervals found for session {session_id} (sheet {sheet_name}), skipping.")
             continue
@@ -619,17 +623,17 @@ def main():
                 view=view,
                 video_path=view_to_path[view],
                 intervals=intervals,
-                seq_len=SEQ_LEN,
-                stride=STRIDE,
-                label_mode=LABEL_MODE,
+                seq_len=seq_len,
+                stride=stride,
+                label_mode=label_mode,
+                output_dir=output_dir,
             )
             manifest_entries.append(stats)
 
-    # Update manifest (append-only)
     if manifest_entries:
         try:
-            if MANIFEST_PATH.exists():
-                with MANIFEST_PATH.open("r") as f:
+            if manifest_path.exists():
+                with manifest_path.open("r", encoding="utf-8") as f:
                     existing = json.load(f)
                 if not isinstance(existing, list):
                     existing = []
@@ -637,10 +641,10 @@ def main():
                 existing = []
 
             existing.extend(manifest_entries)
-            with MANIFEST_PATH.open("w") as f:
+            with manifest_path.open("w", encoding="utf-8") as f:
                 json.dump(existing, f, indent=2)
 
-            print(f"\nSaved/updated manifest: {MANIFEST_PATH}")
+            print(f"\nSaved/updated manifest: {manifest_path}")
         except Exception as e:
             print(f"[WARN] Could not write manifest: {e}")
 
@@ -649,4 +653,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
