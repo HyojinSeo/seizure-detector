@@ -17,7 +17,7 @@ from infer_timeline_latefusion import (
 RAW_VIDEO_DIR = Path("~/gcs/inputs").expanduser()
 
 SESSION = "010626 F1"
-MODEL_PATH = "results/latefusion/all3/best_model.keras"
+MODEL_PATH = "results/latefusion/all3_16_4/best_model.keras"
 
 STRIDE = 4
 SEQ_LEN = 16
