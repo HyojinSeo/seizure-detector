@@ -27,6 +27,8 @@ Examples:
   python src/preprocess_seq_cnn_lstm.py
   python src/preprocess_seq_cnn_lstm.py --seq_len 32 --stride 8
   python src/preprocess_seq_cnn_lstm.py --seq_len 32 --stride 8 --output_dir data/processed_seq/sessions_32_8
+  python src/preprocess_seq_cnn_lstm.py --seq_len 32 --stride 8 --dtype uint8 --output_dir data/processed_seq/sessions_train_32_8_uint8
+  python src/preprocess_seq_cnn_lstm.py --seq_len 32 --stride 8 --dtype float32 --output_dir data/processed_seq/sessions_train_32_8_float32
 """
 
 import argparse
@@ -48,7 +50,10 @@ from tqdm import tqdm
 
 FPS_TARGET = 1
 RESIZE_SHAPE = (128, 128)
-DTYPE = np.float32
+
+# Original setting for float pipeline:
+# DEFAULT_DTYPE = np.float32
+DEFAULT_DTYPE_STR = "uint8"
 
 DEFAULT_SEQ_LEN = 16
 DEFAULT_STRIDE = 4
@@ -57,7 +62,7 @@ DEFAULT_LABEL_MODE = "any"  # "any", "max", "center", "majority"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RAW_VIDEO_DIR = Path("~/gcs/inputs").expanduser()
 DEFAULT_EXCEL_PATH = PROJECT_ROOT / "data" / "seizure_stage.xlsx"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "processed_seq" / "sessions"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "processed_seq" / "sessions_train_32_8_uint8"
 
 VIEWS = ["TOP", "SIDE", "SIDE2"]
 VIEW_CONFIG = {
@@ -349,6 +354,7 @@ def make_sequences_from_frames(
     seq_len: int,
     stride: int,
     label_mode: str = "any",
+    dtype_str: str = "uint8",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Build sliding-window sequences from frame-level arrays.
@@ -398,7 +404,15 @@ def make_sequences_from_frames(
             f"for n_frames={n_frames}."
         )
 
-    x_seq = np.stack(sequences, axis=0).astype(DTYPE)
+    x_seq = np.stack(sequences, axis=0)
+
+    if dtype_str == "float32":
+        x_seq = x_seq.astype(np.float32) / 255.0
+    elif dtype_str == "uint8":
+        x_seq = x_seq.astype(np.uint8)
+    else:
+        raise ValueError(f"Unsupported dtype_str: {dtype_str}")
+
     y_seq = np.array(labels, dtype=np.int64)
 
     print(
@@ -410,13 +424,6 @@ def make_sequences_from_frames(
     return x_seq, y_seq
 
 
-def outputs_exist(session_id: str, view: str, output_dir: Path) -> bool:
-    norm_sess = normalize_session_for_filename(session_id)
-    x_out = output_dir / f"X_SEQ_{view}_{norm_sess}.npy"
-    y_out = output_dir / f"y_SEQ_{view}_{norm_sess}.npy"
-    return x_out.exists() and y_out.exists()
-
-
 def process_session_view(
     session_id: str,
     view: str,
@@ -426,6 +433,7 @@ def process_session_view(
     stride: int,
     label_mode: str,
     output_dir: Path,
+    dtype_str: str,
 ) -> Dict[str, int]:
     """
     For a given session and view:
@@ -515,6 +523,7 @@ def process_session_view(
         seq_len=seq_len,
         stride=stride,
         label_mode=label_mode,
+        dtype_str=dtype_str,
     )
 
     np.save(x_out, x_seq)
@@ -551,11 +560,13 @@ def main():
     ap.add_argument("--raw_video_dir", type=str, default=str(DEFAULT_RAW_VIDEO_DIR))
     ap.add_argument("--excel_path", type=str, default=str(DEFAULT_EXCEL_PATH))
     ap.add_argument("--output_dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
+    ap.add_argument("--dtype", type=str, default=DEFAULT_DTYPE_STR, choices=["uint8", "float32"])
     args = ap.parse_args()
 
     seq_len = int(args.seq_len)
     stride = int(args.stride)
     label_mode = args.label_mode
+    dtype_str = args.dtype
     raw_video_dir = Path(args.raw_video_dir).expanduser()
     excel_path = Path(args.excel_path).expanduser()
     output_dir = Path(args.output_dir).expanduser()
@@ -574,7 +585,7 @@ def main():
 
     print(f"Using OUTPUT_DIR: {output_dir}")
     print(f"SKIP_EXISTING: {SKIP_EXISTING}")
-    print(f"[CONFIG] seq_len={seq_len}, stride={stride}, label_mode={label_mode}")
+    print(f"[CONFIG] seq_len={seq_len}, stride={stride}, label_mode={label_mode}, dtype={dtype_str}")
 
     video_sessions = scan_videos(raw_video_dir)
     excel_sessions = scan_excel_sessions(excel_path)
@@ -627,6 +638,7 @@ def main():
                 stride=stride,
                 label_mode=label_mode,
                 output_dir=output_dir,
+                dtype_str=dtype_str,
             )
             manifest_entries.append(stats)
 
